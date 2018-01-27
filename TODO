@@ -1,0 +1,20 @@
+General
+=======
+
+* Trace ID from milter through all verifiers
+* Logging: syslog and file
+* Config: https://github.com/BurntSushi/toml
+
+
+DKIM
+====
+
+* dkim-atps: Authorized Third-Party Signatures (https://tools.ietf.org/html/rfc6541)
+* dkim-adsp: Author Domain Signing Practices (https://tools.ietf.org/html/rfc5617)
+
+
+DMARC
+=====
+
+* Reporting
+* Percentage

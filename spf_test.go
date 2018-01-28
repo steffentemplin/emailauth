@@ -2,7 +2,6 @@ package emailauth
 
 import (
 	"net"
-	"regexp"
 	"testing"
 )
 
@@ -23,9 +22,7 @@ func TestCheckHost(t *testing.T) {
 }
 
 func TestMech(t *testing.T) {
-	e := "^(?P<qualifier>\\+|-|\\?|~)?(?P<mech>all|include|a|mx|ptr|ip4|ip6|exists)(?:(?P<sep>[:/])(?P<value>.*))?$"
-	exp := regexp.MustCompile(e)
-	directive := exp.FindStringSubmatch("~ip4:192.168.0.0/24")
+	directive := directiveExp.FindStringSubmatch("~ip4:192.168.0.0/24")
 	if directive == nil {
 		t.Fail()
 	} else {
@@ -51,15 +48,14 @@ func TestMech(t *testing.T) {
 		}
 	}
 
-	directive = exp.FindStringSubmatch("redirect=_spf.example.com")
+	directive = directiveExp.FindStringSubmatch("redirect=_spf.example.com")
 	if directive != nil {
 		t.Fail()
 	}
 }
 
 func TestModifier(t *testing.T) {
-	exp := regexp.MustCompile("^(?P<name>[a-z][a-z0-9_\\-\\.]*)=(?P<macrostring>.*)$")
-	modifier := exp.FindStringSubmatch("redirect=_spf.example.com")
+	modifier := modifierExp.FindStringSubmatch("redirect=_spf.example.com")
 	if modifier == nil {
 		t.Fail()
 	} else {
@@ -75,8 +71,29 @@ func TestModifier(t *testing.T) {
 		}
 	}
 
-	modifier = exp.FindStringSubmatch("mx")
+	modifier = modifierExp.FindStringSubmatch("mx")
 	if modifier != nil {
 		t.Fail()
+	}
+}
+
+func TestDomainValidation(t *testing.T) {
+	// valid
+	domains := []string{"example.com", "example.com.",
+		"sub.example.com", "sub.sub.example.com", "sub.sub.example.com."}
+
+	for _, domain := range domains {
+		if isInvalidDomain(domain) {
+			t.Errorf("Valid domain did not match '%s'", domain)
+		}
+	}
+
+	// invalid
+	domains = []string{".example.com", "com", ".com", ".com.", "example..com", "192.168.0.1"}
+
+	for _, domain := range domains {
+		if isValidDomain(domain) {
+			t.Errorf("Invalid domain did match '%s'", domain)
+		}
 	}
 }

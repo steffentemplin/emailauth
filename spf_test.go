@@ -21,63 +21,55 @@ func TestParseAndEvaluate(t *testing.T) {
 func TestCheckHost(t *testing.T) {
 	result := new(SPFValidator).Validate(net.ParseIP("10.20.21.77"), "test@ox.io", "localhost")
 	if result.Result != Pass {
-		t.Error("Expected Pass result")
+		t.Errorf("Expected 'pass' result but got '%s'", result.Result)
 	}
 }
 
-func TestMech(t *testing.T) {
-	directive := directiveExp.FindStringSubmatch("~ip4:192.168.0.0/24")
+func TestParseSPFDirective(t *testing.T) {
+	directive := ParseSPFDirective("~ip4:192.168.0.0/24")
 	if directive == nil {
-		t.Fail()
+		t.Error("General parsing issue")
 	} else {
-		qualifier := directive[1]
-		mechanism := directive[2]
-		separator := directive[3]
-		value := directive[4]
-
-		if qualifier != "~" {
-			t.Fail()
+		if directive.Qualifier != "~" {
+			t.Error("Wrong qualifier")
 		}
 
-		if mechanism != "ip4" {
-			t.Fail()
+		if directive.Mechanism != "ip4" {
+			t.Error("Wrong mechanism")
 		}
 
-		if separator != ":" {
-			t.Fail()
+		if directive.Separator != ":" {
+			t.Error("Wrong separator")
 		}
 
-		if value != "192.168.0.0/24" {
-			t.Fail()
+		if directive.Value != "192.168.0.0/24" {
+			t.Error("Wrong value")
 		}
 	}
 
-	directive = directiveExp.FindStringSubmatch("redirect=_spf.example.com")
+	directive = ParseSPFDirective("redirect=_spf.example.com")
 	if directive != nil {
-		t.Fail()
+		t.Error("Modifier was parsed as directive")
 	}
 }
 
-func TestModifier(t *testing.T) {
-	modifier := modifierExp.FindStringSubmatch("redirect=_spf.example.com")
+func TestParseSPFModifier(t *testing.T) {
+	modifier := ParseSPFModifier("redirect=_spf.example.com")
 	if modifier == nil {
-		t.Fail()
+		t.Error("General parsing issue")
 	} else {
-		name := modifier[1]
-		macroString := modifier[2]
-
-		if name != "redirect" {
-			t.Fail()
+		if modifier.Name != "redirect" {
+			t.Error("Wrong name")
 		}
 
-		if macroString != "_spf.example.com" {
-			t.Fail()
+		if modifier.MacroString != "_spf.example.com" {
+			t.Error("Wrong macro string")
 		}
 	}
 
-	modifier = modifierExp.FindStringSubmatch("mx")
+	modifier = ParseSPFModifier("mx")
 	if modifier != nil {
-		t.Fail()
+		t.Error("Directive was parsed as modifier")
 	}
 }
 

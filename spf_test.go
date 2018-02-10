@@ -5,10 +5,14 @@ import (
 	"testing"
 )
 
-func TestHandlePolicyRecord(t *testing.T) {
-	record := "v=spf1 ip4:192.168.23.0/24 ip4:172.16.44.0/25 ip4:10.20.21.0/24 mx include:example.com ?all"
+func TestParseAndEvaluate(t *testing.T) {
+	rawRecord := "v=spf1 ip4:192.168.23.0/24 ip4:172.16.44.0/25 ip4:10.20.21.0/24 ?all"
+	record, errResult := parseRecord(rawRecord)
+	if errResult != nil {
+		t.Errorf("Parsing error: %s (%s)", errResult.Result, errResult.Explanation)
+	}
 
-	result := handlePolicyRecord(record, net.ParseIP("10.20.21.77"))
+	result := evaluateRecord(record, net.ParseIP("10.20.21.77"), "example.com", false, "test@example.com", 0)
 	if result.Result != Pass {
 		t.Errorf("SPF failed: %s (%s)", result.Result, result.Explanation)
 	}
@@ -80,7 +84,8 @@ func TestModifier(t *testing.T) {
 func TestDomainValidation(t *testing.T) {
 	// valid
 	domains := []string{"example.com", "example.com.",
-		"sub.example.com", "sub.sub.example.com", "sub.sub.example.com."}
+		"sub.example.com", "sub.sub.example.com", "sub.sub.example.com.",
+		"subjustunder63chars-subjustunder63chars-subjustunder63chars-sub.example.com"}
 
 	for _, domain := range domains {
 		if isInvalidDomain(domain) {
@@ -89,7 +94,8 @@ func TestDomainValidation(t *testing.T) {
 	}
 
 	// invalid
-	domains = []string{".example.com", "com", ".com", ".com.", "example..com", "192.168.0.1"}
+	domains = []string{".example.com", "com", ".com", ".com.", "example..com", "192.168.0.1",
+		"subover63chars-subover63chars-subover63chars-subover63chars-subo.example.com."}
 
 	for _, domain := range domains {
 		if isValidDomain(domain) {

@@ -1,10 +1,15 @@
 package emailauth
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
+	"unicode/utf8"
 )
 
 /*
@@ -208,16 +213,22 @@ func checkHost(ip net.IP, domain string, isHeloDomain bool, sender string, looku
 		return errResult
 	}
 
-	return evaluateRecord(record, ip, domain, isHeloDomain, sender, lookups)
+	result, err := evaluateRecord(record, ip, domain, isHeloDomain, sender, lookups)
+	if err != nil {
+		return newSPFResult(Permerror, err.Error())
+	}
+
+	return result
 }
 
-func evaluateRecord(record []SPFTerm, ip net.IP, domain string, isHeloDomain bool, sender string, lookups uint8) *SPFResult {
+func evaluateRecord(record []SPFTerm, ip net.IP, domain string, isHeloDomain bool, sender string, lookups uint8) (*SPFResult, error) {
 	for _, term := range record {
 		if ok, directive := term.ToDirective(); ok {
 			match := false
 			// all|include|a|mx|ptr|ip4|ip6|exists
 			switch directive.Mechanism {
 			case "all":
+				match = true
 				break
 			case "include":
 				break
@@ -235,7 +246,7 @@ func evaluateRecord(record []SPFTerm, ip net.IP, domain string, isHeloDomain boo
 				}
 
 				if matchIP == nil || matchIP.To4() == nil {
-					return newSPFResult(Permerror, "Invalid IPv4 address")
+					return newSPFResult(Permerror, "Invalid IPv4 address"), nil
 				}
 
 				if matchNet == nil {
@@ -252,7 +263,7 @@ func evaluateRecord(record []SPFTerm, ip net.IP, domain string, isHeloDomain boo
 				}
 
 				if matchIP == nil || matchIP.To16() == nil {
-					return newSPFResult(Permerror, "Invalid IPv6 address")
+					return newSPFResult(Permerror, "Invalid IPv6 address"), nil
 				}
 
 				if matchNet == nil {
@@ -268,33 +279,29 @@ func evaluateRecord(record []SPFTerm, ip net.IP, domain string, isHeloDomain boo
 			if match {
 				switch directive.Qualifier {
 				case "+":
-					return newSPFResult(Pass, fmt.Sprintf("Allowed sender IP: %v", ip))
+					return newSPFResult(Pass, fmt.Sprintf("Allowed sender IP: %v", ip)), nil
 				case "-":
 					// TODO: section 6.2, explanation string...
-					return newSPFResult(Fail, fmt.Sprintf("Disallowed sender IP: %v", ip))
+					return newSPFResult(Fail, fmt.Sprintf("Disallowed sender IP: %v", ip)), nil
 				}
 			}
 		} else {
 			_, modifier := term.ToModifier()
 			/*
-			* TODO:
-			*  - every modifier must appear only once => permerror
-			*  - ignore unknown
-			 */
+				TODO:
+				 - every modifier must appear only once => permerror
+				 - ignore unknown
+			*/
 			switch modifier.Name {
 			case "redirect":
-				// TODO: if "all" has occurred, stop
-				domain, err := expandMacro(modifier.MacroString)
-				if err != nil {
-					// TODO
-				}
+				// TODO: if "all" is contained, ignore
 				domain = domain
 				/*
-				* The result of this new evaluation of check_host() is then considered
-				* the result of the current evaluation with the exception that if no
-				* SPF record is found, or if the <target-name> is malformed, the result
-				* is a "permerror" rather than "none".
-				 */
+					The result of this new evaluation of check_host() is then considered
+					the result of the current evaluation with the exception that if no
+					SPF record is found, or if the <target-name> is malformed, the result
+					is a "permerror" rather than "none".
+				*/
 				break
 			case "exp":
 				break
@@ -304,7 +311,7 @@ func evaluateRecord(record []SPFTerm, ip net.IP, domain string, isHeloDomain boo
 		}
 	}
 
-	return newSPFResult(Neutral, "Default result")
+	return newSPFResult(Neutral, "Default result"), nil
 }
 
 func parseRecord(rawRecord string) ([]SPFTerm, *SPFResult) {
@@ -362,7 +369,177 @@ func findSPFRecord(domain string) (string, *SPFResult) {
 	return record, nil
 }
 
-func expandMacro(macro string) (string, error) {
+func expandMacro(macro string, ip net.IP, domain string, sender string, heloDomain string, recipient string, isExp bool) (string, error) {
+	/*
+		General macro letters:
+		s = <sender>
+		l = local-part of <sender>
+		o = domain of <sender>
+		d = <domain>
+		i = <ip>
+		p = the validated domain name of <ip> (do not use)
+		v = the string "in-addr" if <ip> is ipv4, or "ip6" if <ip> is ipv6
+		h = HELO/EHLO domain
+
+		Exp. only macro letters:
+		c = SMTP client IP (easily readable format)
+		r = domain name of host performing the check
+		t = current timestamp
+	*/
+	now := time.Now().Unix()
+	isIPv4 := ip.To4() != nil
+	var result bytes.Buffer
+	mlen := len(macro)
+	for i, w := 0, 0; i < mlen; i += w {
+		r, w := utf8.DecodeRuneInString(macro[i:])
+		inMacro := false
+		switch r {
+		case '%':
+			if inMacro {
+				result.WriteRune('%')
+				inMacro = false
+			} else {
+				inMacro = true
+			}
+		case '_':
+			if inMacro {
+				result.WriteRune(' ')
+				inMacro = false
+			} else {
+				result.WriteRune(r)
+			}
+		case '-':
+			if inMacro {
+				result.WriteString("%20")
+				inMacro = false
+			} else {
+				result.WriteRune(r)
+			}
+		case '{':
+			if inMacro {
+				// "^(?P<qualifier>\\+|-|\\?|~)?(?P<mech>all|include|a|mx|ptr|ip4|ip6|exists)(?:(?P<sep>[:/])(?P<value>.*))?$"
+				macroExp := regexp.MustCompile("^{(?P<letter>[slodipvhcrt]{1})(?P<transformers>[0-9]*r?)(?P<delimiters>[.-+,/_=]*)}")
+				macroParts := macroExp.FindStringSubmatch(macro[i:])
+				if macroParts == nil {
+					return "", errors.New("Illegal macro syntax")
+				}
+				w += len(macroParts[0])
+
+				letter := macroParts[1]
+				transformers := macroParts[2]
+				reverse := false
+				if len(transformers) > 0 && transformers[len(transformers)-1] == 'r' {
+					if len(transformers) == 1 {
+						transformers = ""
+					} else {
+						transformers = transformers[:len(transformers)-1]
+					}
+					reverse = true
+				}
+				delimiters := macroParts[3]
+
+				replacement := ""
+				switch []rune(letter)[0] {
+				case 's':
+					replacement = sender
+				case 'l':
+					replacement = strings.Split(sender, "@")[0]
+				case 'o':
+					replacement = strings.Split(sender, "@")[1]
+				case 'd':
+					replacement = domain
+				case 'i':
+					if isIPv4 {
+						replacement = ip.String()
+					} else {
+						// TODO: %{ir} 2001:db8::cb01 => 1.0.b.c.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2
+						/*
+							For IPv6 addresses, the "i" macro expands to a dot-format address; it
+							is intended for use in %{ir}.  The "c" macro can expand to any of the
+							hexadecimal colon-format addresses specified in Section 2.2 of
+							[RFC4291].  It is intended for humans to read.
+						*/
+						replacement = ip.String()
+					}
+				case 'p':
+					// TODO: ?
+					/*
+						The "p" macro expands to the validated domain name of <ip>.  The
+						procedure for finding the validated domain name is defined in
+						Section 5.5.  If the <domain> is present in the list of validated
+						domains, it SHOULD be used.  Otherwise, if a subdomain of the
+						<domain> is present, it SHOULD be used.  Otherwise, any name from the
+						list can be used.  If there are no validated domain names or if a DNS
+						error occurs, the string "unknown" is used.
+					*/
+					replacement = ip.String()
+				case 'v':
+					if isIPv4 {
+						replacement = "in-addr"
+					} else {
+						replacement = "ip6"
+					}
+				case 'h':
+					replacement = heloDomain
+				case 'c':
+					if !isExp {
+						return "", errors.New("Illegal macro syntax")
+					}
+					replacement = ip.String()
+				case 'r':
+					if !isExp {
+						return "", errors.New("Illegal macro syntax")
+					}
+					// TODO: ?
+					/*
+						The "r" macro expands to the name of the receiving MTA.  This SHOULD
+						be a fully qualified domain name, but if one does not exist (as when
+						the checking is done by a Mail User Agent (MUA)) or if policy
+						restrictions dictate otherwise, the word "unknown" SHOULD be
+						substituted.  The domain name can be different from the name found in
+						the MX record that the client MTA used to locate the receiving MTA.
+					*/
+					replacement = recipient
+				case 't':
+					if !isExp {
+						return "", errors.New("Illegal macro syntax")
+					}
+					replacement = strconv.FormatInt(now, 10)
+				}
+
+				// TODO:
+				reverse = reverse
+				transformers = transformers
+				delimiters = delimiters
+				result.WriteString(replacement)
+			} else {
+				result.WriteRune(r)
+			}
+		default:
+			if inMacro {
+				return "", errors.New("Illegal macro syntax")
+			}
+			result.WriteRune(r)
+		}
+
+		/*
+			TODO:
+			When the result of macro expansion is used in a domain name query, if
+			the expanded domain name exceeds 253 characters (the maximum length
+			of a domain name in this format), the left side is truncated to fit,
+			by removing successive domain labels (and their following dots) until
+			the total length does not exceed 253 characters.
+
+			Uppercase macros expand exactly as their lowercase equivalents, and
+			are then URL escaped.  URL escaping MUST be performed for characters
+			not in the "unreserved" set, which is defined in [RFC3986].
+
+			Care has to be taken by the sending ADMD so that macro expansion for
+			legitimate email does not exceed the 63-character limit on DNS
+			labels.  The local-part of email addresses, in particular, can have
+			more than 63 characters between dots.
+		*/
+	}
 	//FIXME
 	return "", nil
 }

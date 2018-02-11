@@ -1,6 +1,7 @@
 package emailauth
 
 import (
+	"encoding/hex"
 	"net"
 	"regexp"
 	"testing"
@@ -109,8 +110,6 @@ func TestParseMacro(t *testing.T) {
 		t.Errorf("Macro could not be parsed")
 	}
 
-	t.Logf("Macro %s has length %d", macro, len(macroParts[0]))
-
 	letter := macroParts[1]
 	transformers := macroParts[2]
 	reverse := false
@@ -124,5 +123,53 @@ func TestParseMacro(t *testing.T) {
 	}
 	delimiters := macroParts[3]
 
-	t.Logf("l: %s, t: %s, r: %s, d: %d", letter, transformers, reverse, delimiters)
+	assertStringEquals("l", letter, t)
+	assertStringEquals("1", transformers, t)
+	assertBoolEquals(true, reverse, t)
+	assertStringEquals("-.", delimiters, t)
+}
+
+func assertStringEquals(expected string, actual string, t *testing.T) {
+	if expected != actual {
+		t.Errorf("Expected '%s' but got '%s'", expected, actual)
+	}
+}
+
+func assertBoolEquals(expected bool, actual bool, t *testing.T) {
+	if expected != actual {
+		t.Errorf("Expected '%s' but got '%s'", expected, actual)
+	}
+}
+func TestNormalizeIPv6(t *testing.T) {
+	// 2001:db8::cb01
+	ip := net.ParseIP("2001:db8::cb01")
+	if ip == nil {
+		t.Error("IP parsing issue")
+	}
+
+	ip4 := ip.To4()
+	if ip4 != nil {
+		t.Error("IPv6 was recognized as IPv4")
+	}
+
+	ip = ip.To16()
+	if ip == nil {
+		t.Error("IPv6 was not recognized as such")
+	}
+
+	buf := make([]byte, 39)
+	off := 0
+	for i := 0; i < len(ip); i = i + 2 {
+		block := ip[i : i+2]
+		off += hex.Encode(buf[off:off+4], block)
+		if off < len(buf) {
+			buf[off] = ':'
+			off++
+		}
+	}
+
+	ipStr := string(buf)
+	if ipStr != "2001:0db8:0000:0000:0000:0000:0000:cb01" {
+		t.Errorf("Expected '%s' but got '%s'", "2001:0db8:0000:0000:0000:0000:0000:cb01", ipStr)
+	}
 }

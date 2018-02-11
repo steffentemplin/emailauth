@@ -2,6 +2,7 @@ package emailauth
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -222,22 +223,35 @@ func checkHost(ip net.IP, domain string, isHeloDomain bool, sender string, looku
 }
 
 func evaluateRecord(record []SPFTerm, ip net.IP, domain string, isHeloDomain bool, sender string, lookups uint8) (*SPFResult, error) {
+	hasAll := false
+	var expModifier *SPFModifier
+	for _, term := range record {
+		if ok, directive := term.ToDirective(); ok {
+			if directive.Mechanism == "all" {
+				hasAll = true
+			}
+		} else {
+			_, modifier := term.ToModifier()
+			if modifier.Name == "exp" {
+				if expModifier != nil {
+					return newSPFResult(Permerror, "Multiple 'exp' modifiers"), nil
+				}
+				expModifier = modifier
+			}
+		}
+	}
+
+	hadRedirect := false
 	for _, term := range record {
 		if ok, directive := term.ToDirective(); ok {
 			match := false
-			// all|include|a|mx|ptr|ip4|ip6|exists
 			switch directive.Mechanism {
 			case "all":
 				match = true
-				break
 			case "include":
-				break
 			case "a":
-				break
 			case "mx":
-				break
 			case "ptr":
-				break
 			case "ip4":
 				matchIP, matchNet, err := net.ParseCIDR(directive.Value)
 				if err != nil {
@@ -254,7 +268,6 @@ func evaluateRecord(record []SPFTerm, ip net.IP, domain string, isHeloDomain boo
 				} else {
 					match = matchNet.Contains(ip)
 				}
-				break
 			case "ip6":
 				matchIP, matchNet, err := net.ParseCIDR(directive.Value)
 				if err != nil {
@@ -271,9 +284,7 @@ func evaluateRecord(record []SPFTerm, ip net.IP, domain string, isHeloDomain boo
 				} else {
 					match = matchNet.Contains(ip)
 				}
-				break
 			case "exists":
-				break
 			}
 
 			if match {
@@ -287,26 +298,24 @@ func evaluateRecord(record []SPFTerm, ip net.IP, domain string, isHeloDomain boo
 			}
 		} else {
 			_, modifier := term.ToModifier()
-			/*
-				TODO:
-				 - every modifier must appear only once => permerror
-				 - ignore unknown
-			*/
 			switch modifier.Name {
 			case "redirect":
-				// TODO: if "all" is contained, ignore
-				domain = domain
+				if hasAll {
+					break
+				}
+
+				if hadRedirect {
+					return newSPFResult(Permerror, "Multiple 'redirect' modifiers"), nil
+				}
+
+				hadRedirect = true
 				/*
+					TODO:
 					The result of this new evaluation of check_host() is then considered
 					the result of the current evaluation with the exception that if no
 					SPF record is found, or if the <target-name> is malformed, the result
 					is a "permerror" rather than "none".
 				*/
-				break
-			case "exp":
-				break
-			default:
-				break
 			}
 		}
 	}
@@ -452,14 +461,13 @@ func expandMacro(macro string, ip net.IP, domain string, sender string, heloDoma
 					if isIPv4 {
 						replacement = ip.String()
 					} else {
-						// TODO: %{ir} 2001:db8::cb01 => 1.0.b.c.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2
 						/*
 							For IPv6 addresses, the "i" macro expands to a dot-format address; it
 							is intended for use in %{ir}.  The "c" macro can expand to any of the
 							hexadecimal colon-format addresses specified in Section 2.2 of
 							[RFC4291].  It is intended for humans to read.
 						*/
-						replacement = ip.String()
+						replacement = ipv6ToDotFormat(ip)
 					}
 				case 'p':
 					// TODO: ?
@@ -507,8 +515,11 @@ func expandMacro(macro string, ip net.IP, domain string, sender string, heloDoma
 					replacement = strconv.FormatInt(now, 10)
 				}
 
+				if reverse {
+					replacement = reverseString(replacement)
+				}
+
 				// TODO:
-				reverse = reverse
 				transformers = transformers
 				delimiters = delimiters
 				result.WriteString(replacement)
@@ -544,6 +555,22 @@ func expandMacro(macro string, ip net.IP, domain string, sender string, heloDoma
 	return "", nil
 }
 
+func ipv6ToDotFormat(ip net.IP) string {
+	buf := make([]byte, 63)
+	ipStr := hex.EncodeToString(ip)
+	i := 0
+	for _, b := range []byte(ipStr) {
+		buf[i] = b
+		i++
+		if i < len(buf) {
+			buf[i] = '.'
+			i++
+		}
+	}
+
+	return string(buf)
+}
+
 func isValidDomain(domain string) bool {
 	if len(domain) == 0 || len(domain) > 255 {
 		return false
@@ -575,4 +602,12 @@ func sanitizeDomainForPrinting(domain string) string {
 
 	// TODO: remove control characters
 	return domain
+}
+
+func reverseString(s string) string {
+	runes := []rune(s)
+	for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
+		runes[i], runes[j] = runes[j], runes[i]
+	}
+	return string(runes)
 }
